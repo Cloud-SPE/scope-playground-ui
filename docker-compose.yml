@@ -1,0 +1,40 @@
+services:
+  scope:
+    build:
+      context: ./scope
+      dockerfile: Dockerfile
+    image: daydream-scope:local
+    container_name: daydream-scope
+    restart: unless-stopped
+    gpus: all
+    environment:
+      DAYDREAM_SCOPE_MODELS_DIR: /workspace/models
+      DAYDREAM_SCOPE_ASSETS_DIR: /workspace/assets
+      DAYDREAM_SCOPE_LOGS_DIR: /workspace/logs
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CLOUDFLARE_TURN_KEY_ID: ${CLOUDFLARE_TURN_KEY_ID}
+      CLOUDFLARE_TURN_KEY_API_TOKEN: ${CLOUDFLARE_TURN_KEY_API_TOKEN}
+      HF_TOKEN: ${HF_TOKEN}
+    volumes:
+      - ./scope/workspace:/workspace
+
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    image: daydream-caddy:local
+    container_name: daydream-caddy
+    restart: unless-stopped
+    depends_on:
+      - scope
+    environment:
+      SCOPE_HOST: ${SCOPE_HOST:-scope.example.com}
+    volumes:
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+
+networks:
+  default:
+    name: ingress
+    external: true

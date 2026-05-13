@@ -1,0 +1,29 @@
+{$SCOPE_HOST}:443, :8080 {
+    @options {
+        method OPTIONS
+        path /api/* /health /docs* /openapi.json /redoc*
+    }
+
+    handle @options {
+        header Access-Control-Allow-Origin *
+        header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        header Access-Control-Allow-Headers *
+        header Access-Control-Max-Age "3600"
+        respond 204
+    }
+
+    @scope_api path /api/* /health /docs* /openapi.json /redoc*
+    handle @scope_api {
+        reverse_proxy daydream-scope:8000 {
+            header_down >Access-Control-Allow-Origin *
+            header_down >Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            header_down >Access-Control-Allow-Headers *
+        }
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}
