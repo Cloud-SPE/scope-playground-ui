@@ -11,6 +11,16 @@ interface ApiRequestOptions extends RequestInit {
   logResponse?: boolean
 }
 
+interface GatewaySessionOpenResponse {
+  session_id?: string
+}
+
+interface GatewaySessionState {
+  supported: boolean | null
+  sessionId: string | null
+  opening: Promise<string | null> | null
+}
+
 export interface StatusSnapshot {
   pipelineStatus: PipelineStatusResponse
   modelStatus: ModelStatusResponse
@@ -19,6 +29,8 @@ export interface StatusSnapshot {
 function trimBaseUrl(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, '')
 }
+
+const gatewaySessionByBaseUrl = new Map<string, GatewaySessionState>()
 
 function resolveBaseUrl(baseUrl: string) {
   const normalizedBaseUrl = trimBaseUrl(baseUrl)
@@ -37,15 +49,117 @@ export function stringifyPayload(payload: unknown) {
   return typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
 }
 
-export async function apiRequest<T = unknown>(
+function shouldUseGatewaySession(path: string) {
+  return path.startsWith('/api/v1/')
+}
+
+function gatewayStateFor(baseUrl: string): GatewaySessionState {
+  const normalizedBaseUrl = resolveBaseUrl(baseUrl)
+  let state = gatewaySessionByBaseUrl.get(normalizedBaseUrl)
+  if (!state) {
+    state = {
+      supported: null,
+      sessionId: null,
+      opening: null,
+    }
+    gatewaySessionByBaseUrl.set(normalizedBaseUrl, state)
+  }
+  return state
+}
+
+async function ensureGatewaySession(baseUrl: string): Promise<string | null> {
+  const normalizedBaseUrl = resolveBaseUrl(baseUrl)
+  const state = gatewayStateFor(normalizedBaseUrl)
+
+  if (state.supported === false) return null
+  if (state.sessionId) return state.sessionId
+  if (state.opening) return state.opening
+
+  state.opening = (async () => {
+    const response = await fetch(`${normalizedBaseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+
+    const contentType = response.headers.get('content-type') || ''
+    const body = contentType.includes('application/json')
+      ? await response.json()
+      : await response.text()
+
+    if (response.status === 404 || response.status === 405) {
+      state.supported = false
+      state.sessionId = null
+      return null
+    }
+
+    if (!response.ok) {
+      throw new Error(`/v1/sessions failed (${response.status}): ${stringifyPayload(body)}`)
+    }
+
+    const sessionId = (body as GatewaySessionOpenResponse).session_id
+    if (!sessionId) {
+      throw new Error(`/v1/sessions succeeded but no session_id was returned: ${stringifyPayload(body)}`)
+    }
+
+    state.supported = true
+    state.sessionId = sessionId
+    return sessionId
+  })()
+
+  try {
+    return await state.opening
+  } finally {
+    state.opening = null
+  }
+}
+
+function clearGatewaySession(baseUrl: string) {
+  const state = gatewayStateFor(baseUrl)
+  state.sessionId = null
+  state.opening = null
+}
+
+export async function closeGatewaySession(baseUrl: string): Promise<void> {
+  const normalizedBaseUrl = resolveBaseUrl(baseUrl)
+  const state = gatewayStateFor(normalizedBaseUrl)
+  const sessionId = state.sessionId
+  clearGatewaySession(normalizedBaseUrl)
+
+  if (!sessionId || state.supported !== true) return
+
+  try {
+    await fetch(`${normalizedBaseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+  } catch {
+    // Best-effort cleanup only; local UI shutdown should not fail on this.
+  }
+}
+
+async function sendApiRequest<T = unknown>(
   baseUrl: string,
   path: string,
-  options: ApiRequestOptions = {},
+  options: ApiRequestOptions,
+  retryOnMissingSession: boolean,
 ): Promise<{ status: number; body: T }> {
   const normalizedBaseUrl = resolveBaseUrl(baseUrl)
   const headers = new Headers(options.headers)
   if (!headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
+  }
+
+  if (shouldUseGatewaySession(path)) {
+    const gatewaySessionId = await ensureGatewaySession(normalizedBaseUrl)
+    if (gatewaySessionId) {
+      headers.set('X-Daydream-Session', gatewaySessionId)
+    }
   }
 
   const response = await fetch(`${normalizedBaseUrl}${path}`, {
@@ -58,6 +172,19 @@ export async function apiRequest<T = unknown>(
     ? await response.json()
     : await response.text()
 
+  if (
+    retryOnMissingSession &&
+    shouldUseGatewaySession(path) &&
+    response.status === 409 &&
+    typeof body === 'object' &&
+    body !== null &&
+    'error' in body &&
+    body.error === 'no_session'
+  ) {
+    clearGatewaySession(normalizedBaseUrl)
+    return sendApiRequest<T>(normalizedBaseUrl, path, options, false)
+  }
+
   if (!response.ok) {
     throw new Error(`${path} failed (${response.status}): ${stringifyPayload(body)}`)
   }
@@ -66,6 +193,14 @@ export async function apiRequest<T = unknown>(
     status: response.status,
     body: body as T,
   }
+}
+
+export async function apiRequest<T = unknown>(
+  baseUrl: string,
+  path: string,
+  options: ApiRequestOptions = {},
+): Promise<{ status: number; body: T }> {
+  return sendApiRequest<T>(baseUrl, path, options, true)
 }
 
 export async function fetchSchemas(baseUrl: string) {

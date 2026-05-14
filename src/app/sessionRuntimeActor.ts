@@ -1,6 +1,6 @@
 import { fromCallback } from 'xstate'
 import type { InitialParameters, StreamMode } from '../types'
-import { createWebRtcOffer, fetchIceServers, patchIceCandidate } from './scope'
+import { closeGatewaySession, createWebRtcOffer, fetchIceServers, patchIceCandidate } from './scope'
 import type { DiagnosticsState } from './studioTypes'
 
 export type SessionChildInboundEvent =
@@ -64,6 +64,8 @@ export const sessionRuntimeActor = fromCallback<
       peerConnection.close()
       peerConnection = null
     }
+
+    void closeGatewaySession(input.baseUrl)
   }
 
   receive((rawEvent: SessionChildInboundEvent | { type: string; payload?: unknown }) => {
